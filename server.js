@@ -79,24 +79,55 @@ app.post('/apps/measurements/delete', async (req, res) => {
 });
 
 const port = process.env.PORT || 3000;
+// Ensure fetch is available (Node 18+ has global.fetch; otherwise use node-fetch)
+const fetch = global.fetch || require('node-fetch');
+
 app.get('/apps/measurements/selected', async (req, res) => {
   try {
-    const { customer_id } = req.query;
+    const shop = (req.query.shop || process.env.SHOP || '').replace(/^https?:\/\//, '');
+    const customer_id = req.query.customer_id;
 
-    if (!customer_id) {
-      return res.status(400).json({ ok: false, error: 'Missing customer_id' });
+    if (!shop) return res.status(400).json({ ok: false, error: 'Missing shop' });
+    if (!customer_id) return res.status(400).json({ ok: false, error: 'Missing customer_id' });
+
+    const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
+    const API_VERSION = process.env.API_VERSION || '2025-10';
+
+    if (!ADMIN_TOKEN) return res.status(500).json({ ok: false, error: 'Admin token not configured' });
+
+    const url = `https://${shop}/admin/api/${API_VERSION}/customers/${encodeURIComponent(customer_id)}/metafields.json`;
+    const resp = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'X-Shopify-Access-Token': ADMIN_TOKEN,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      console.error('Shopify metafields fetch failed', resp.status, text);
+      return res.status(resp.status).send(text);
     }
 
-    // Mock logic for now — replace with real measurement check later
-    // Example: check if customer has measurement metaobject
-    console.log('Incoming measurement check for customer_id:', customer_id);
+    const json = await resp.json();
+    const metafields = Array.isArray(json.metafields) ? json.metafields : [];
 
-    // Temporary response so we know proxy works
-    return res.json({ ok: true, selected: "default_measurement" });
+    const measurementMeta = metafields.find(m => m.namespace === 'measurements' && (m.key === 'selected' || m.key === 'measurement'));
+    const anyMeasurement = metafields.some(m => m.namespace === 'measurements');
 
+    if (measurementMeta) {
+      return res.json({ ok: true, selected: measurementMeta.value });
+    } else if (anyMeasurement) {
+      return res.json({ ok: true, selected: true });
+    } else {
+      return res.json({ ok: false });
+    }
   } catch (err) {
     console.error('Error in /apps/measurements/selected:', err);
-    res.status(500).json({ ok: false, error: err.message });
+    return res.status(500).json({ ok: false, error: err.message });
   }
 });
+
 app.listen(port, () => console.log(`Server running on port ${port}`));
