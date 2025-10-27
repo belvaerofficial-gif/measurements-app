@@ -80,7 +80,13 @@ app.post('/apps/measurements/delete', async (req, res) => {
 
 const port = process.env.PORT || 3000;
 // Ensure fetch is available (Node 18+ has global.fetch; otherwise use node-fetch)
-const fetch = global.fetch || require('node-fetch');
+// Ensure fetch exists: if Node already provides it (Node 18+/22+), keep it.
+// Otherwise, polyfill it by assigning to globalThis.fetch only when missing.
+if (typeof globalThis.fetch === 'undefined') {
+  // node-fetch v2 uses require; if you installed v2 this will work
+  globalThis.fetch = require('node-fetch');
+}
+
 
 app.get('/apps/measurements/selected', async (req, res) => {
   try {
