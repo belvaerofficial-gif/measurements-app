@@ -1,0 +1,174 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>My Measurements</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;margin:20px;color:#111}
+    .wrap{max-width:820px;margin:0 auto}
+    h1{font-size:22px;margin-bottom:8px}
+    .note{color:#666;margin-bottom:16px}
+    .row{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+    input[type=text], input[type=number], select{padding:8px;border:1px solid #ddd;border-radius:6px;flex:1}
+    button{padding:8px 12px;border-radius:6px;border:0;background:#0a66ff;color:#fff;cursor:pointer}
+    button.ghost{background:#eee;color:#111}
+    .card{border:1px solid #eee;padding:12px;border-radius:8px;margin-bottom:12px}
+    .label{font-weight:600}
+    .actions{display:flex;gap:8px}
+    .error{color:#a00}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Your Measurements</h1>
+    <div class="note">This page lets you save custom measurements and pick one for orders. Open this from your **Customer account** page so the page gets your customer id automatically.</div>
+
+    <div id="status" class="note"></div>
+
+    <div class="card" id="list-area">
+      <div id="list"></div>
+    </div>
+
+    <div class="card">
+      <div class="label">Add / Edit Measurement</div>
+      <div style="margin-top:8px">
+        <input id="m_label" placeholder="Label (e.g., 'My Shirt')" />
+      </div>
+      <div style="margin-top:8px" class="row">
+        <input id="m_neck" placeholder="Neck (cm)" />
+        <input id="m_chest" placeholder="Chest (cm)" />
+        <input id="m_waist" placeholder="Waist (cm)" />
+        <input id="m_hip" placeholder="Hip (cm)" />
+      </div>
+      <div style="margin-top:8px">
+        <button id="saveBtn">Save measurement</button>
+        <button id="cancelEdit" class="ghost" style="display:none">Cancel</button>
+      </div>
+    </div>
+
+    <div class="note">If you opened this page directly and see &quot;Missing customer_id&quot;, we’ll add a link inside the account page to pass your customer id. Do not paste your admin token anywhere.</div>
+    <div id="error" class="error"></div>
+  </div>
+
+<script>
+(async function(){
+  const $ = sel => document.querySelector(sel);
+  const q = new URLSearchParams(window.location.search);
+  const customerId = q.get('customer_id');
+  const status = $('#status');
+  const err = $('#error');
+
+  function showStatus(t){ status.textContent = t || ''; }
+  function showError(t){ err.textContent = t || ''; }
+
+  if (!customerId) {
+    showError('Missing customer_id. Open this page from your customer account (we will add that link in the theme).');
+    return;
+  }
+
+  const apiBase = ''; // empty -> same path via proxy (/apps/measurements/*)
+
+  async function request(path, opts){
+    try{
+      const res = await fetch(apiBase + path, Object.assign({credentials:'include'}, opts || {}));
+      const json = await res.json();
+      return json;
+    } catch(e){ throw e; }
+  }
+
+  async function loadList(){
+    showStatus('Loading…');
+    try{
+      const r = await request(`/apps/measurements/list?customer_id=${encodeURIComponent(customerId)}`);
+      const data = r.data || [];
+      renderList(data);
+      showStatus('');
+    } catch(e){ showError('Failed to load measurements'); showStatus(''); }
+  }
+
+  function renderList(items){
+    const list = $('#list');
+    if (!items.length) {
+      list.innerHTML = '<div class="note">No saved measurements yet.</div>';
+      return;
+    }
+    list.innerHTML = items.map(it => `
+      <div class="card" data-id="${it.id}">
+        <div class="row"><div style="flex:1"><strong>${escapeHtml(it.label || '—')}</strong></div>
+          <div class="actions">
+            <button class="choose ghost" data-id="${it.id}">Use for order</button>
+            <button class="edit ghost" data-id="${it.id}">Edit</button>
+            <button class="del ghost" data-id="${it.id}">Delete</button>
+          </div>
+        </div>
+        <div style="margin-top:6px;color:#555">
+          Neck: ${escapeHtml(it.neck||'—')} | Chest: ${escapeHtml(it.chest||'—')} | Waist: ${escapeHtml(it.waist||'—')} | Hip: ${escapeHtml(it.hip||'—')}
+        </div>
+      </div>
+    `).join('');
+    // wire buttons
+    list.querySelectorAll('.edit').forEach(b=>b.onclick = e=>{
+      const id = b.dataset.id;
+      const item = items.find(x=>x.id===id);
+      if(!item) return;
+      $('#m_label').value = item.label || '';
+      $('#m_neck').value = item.neck || '';
+      $('#m_chest').value = item.chest || '';
+      $('#m_waist').value = item.waist || '';
+      $('#m_hip').value = item.hip || '';
+      $('#saveBtn').dataset.edit = id;
+      $('#cancelEdit').style.display = 'inline-block';
+    });
+    list.querySelectorAll('.del').forEach(b=>b.onclick = async e=>{
+      if(!confirm('Delete this measurement?')) return;
+      const id = b.dataset.id;
+      try{
+        await request('/apps/measurements/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({customer_id:customerId, id})});
+        loadList();
+      }catch(ex){ showError('Delete failed'); }
+    });
+    list.querySelectorAll('.choose').forEach(b=>b.onclick = async e=>{
+      // Choosing measurement: we'll save it in a customer metafield tag 'selected_measurement' for checkout usage
+      const id = b.dataset.id;
+      try{
+        // call save endpoint to set a special metafield: we will re-use the measurements metafield and also set selected id as a separate metafield
+        await request('/apps/measurements/save', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({customer_id:customerId, id: id, label: 'SELECTOR_MARKER'})});
+        // simpler: call an endpoint to set chosen measurement (we haven't implemented one). For now show a message:
+        alert('Selected measurement ID: ' + id + '. Next step: we will persist selection for checkout.');
+      }catch(ex){ showError('Choose failed'); }
+    });
+  }
+
+  function escapeHtml(s){ return (''+s).replace(/[&<>"']/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
+
+  $('#saveBtn').onclick = async function(){
+    showError(''); showStatus('Saving…');
+    const payload = {
+      customer_id: customerId,
+      id: this.dataset.edit || null,
+      label: $('#m_label').value.trim(),
+      neck: $('#m_neck').value.trim(),
+      chest: $('#m_chest').value.trim(),
+      waist: $('#m_waist').value.trim(),
+      hip: $('#m_hip').value.trim()
+    };
+    if(!payload.label){ showError('Label required'); showStatus(''); return; }
+    try{
+      const r = await request('/apps/measurements/save', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+      $('#saveBtn').removeAttribute('data-edit');
+      $('#cancelEdit').style.display = 'none';
+      $('#m_label').value=''; $('#m_neck').value=''; $('#m_chest').value=''; $('#m_waist').value=''; $('#m_hip').value='';
+      loadList();
+      showStatus('');
+    }catch(ex){ showError('Save failed'); showStatus(''); }
+  };
+
+  $('#cancelEdit').onclick = function(){ $('#saveBtn').removeAttribute('data-edit'); $('#cancelEdit').style.display='none'; $('#m_label').value=''; $('#m_neck').value=''; $('#m_chest').value=''; $('#m_waist').value=''; $('#m_hip').value=''; };
+
+  // initial load
+  loadList();
+})();
+</script>
+</body>
+</html>
