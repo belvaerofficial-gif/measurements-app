@@ -3,10 +3,15 @@ const express = require('express');
 const fetch = require('node-fetch');
 const bodyParser = require('body-parser');
 const cors = require('cors');
+const path = require('path');
 
 const app = express();
 app.use(bodyParser.json());
 app.use(cors());
+// serve the measurements page directly
+app.get('/measurements.html', (req, res) => {
+  res.sendFile(path.join(__dirname, 'measurements.html'));
+});
 
 const SHOP = process.env.SHOP;
 const TOKEN = process.env.ADMIN_TOKEN;
