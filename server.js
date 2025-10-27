@@ -79,4 +79,24 @@ app.post('/apps/measurements/delete', async (req, res) => {
 });
 
 const port = process.env.PORT || 3000;
+app.get('/apps/measurements/selected', async (req, res) => {
+  try {
+    const { customer_id } = req.query;
+
+    if (!customer_id) {
+      return res.status(400).json({ ok: false, error: 'Missing customer_id' });
+    }
+
+    // Mock logic for now — replace with real measurement check later
+    // Example: check if customer has measurement metaobject
+    console.log('Incoming measurement check for customer_id:', customer_id);
+
+    // Temporary response so we know proxy works
+    return res.json({ ok: true, selected: "default_measurement" });
+
+  } catch (err) {
+    console.error('Error in /apps/measurements/selected:', err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
 app.listen(port, () => console.log(`Server running on port ${port}`));
