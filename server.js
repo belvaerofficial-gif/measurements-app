@@ -1,50 +1,67 @@
+// server.js - cleaned + fixed version
 require('dotenv').config();
 const express = require('express');
-const fetch = require('node-fetch');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const path = require('path');
 
+// Safe fetch: use global fetch if available (Node 18+/22+), otherwise require node-fetch
+let fetchFn;
+if (typeof globalThis.fetch === 'function') {
+  fetchFn = globalThis.fetch;
+} else {
+  // eslint-disable-next-line global-require
+  fetchFn = require('node-fetch');
+}
+const fetch = fetchFn;
+
 const app = express();
 app.use(bodyParser.json());
 app.use(cors());
-// serve the measurements page directly
+
+// serve the measurements page directly (for direct access during testing)
 app.get('/measurements.html', (req, res) => {
   res.sendFile(path.join(__dirname, 'measurements.html'));
 });
 
-const SHOP = process.env.SHOP;
-const TOKEN = process.env.ADMIN_TOKEN;
-const API_VER = process.env.API_VERSION || '2025-10';
+// Helper that performs Admin REST requests for any shop you pass in
+async function adminRequestForShop(shop, path, method = 'GET', body = null, apiVersion = '2025-10') {
+  const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
+  if (!ADMIN_TOKEN) throw new Error('ADMIN_TOKEN not configured in env');
 
-async function adminRequest(path, method = 'GET', body = null) {
-  const url = `https://${SHOP}/admin/api/${API_VER}${path}`;
+  const url = `https://${shop}/admin/api/${apiVersion}${path}`;
   const opts = {
     method,
     headers: {
-      'X-Shopify-Access-Token': TOKEN,
+      'X-Shopify-Access-Token': ADMIN_TOKEN,
       'Content-Type': 'application/json'
     }
   };
-  if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(url, opts);
-  const text = await res.text();
-  try { return JSON.parse(text); } catch { return { raw: text }; }
+  if (body !== null) opts.body = JSON.stringify(body);
+
+  const r = await fetch(url, opts);
+  const txt = await r.text().catch(() => null);
+  try {
+    return { ok: r.ok, status: r.status, body: JSON.parse(txt) };
+  } catch (e) {
+    return { ok: r.ok, status: r.status, body: txt };
+  }
 }
 
 // GET selected measurements for a customer (tries metaobjects then metafields)
 app.get('/apps/measurements/selected', async (req, res) => {
   try {
-    const shop = (req.query.shop || process.env.SHOP || '').replace(/^https?:\/\//,'');
+    const shopFromReq = (req.query.shop || '').toString().replace(/^https?:\/\//, '').trim();
+    const shop = shopFromReq || (process.env.SHOP || '').replace(/^https?:\/\//, '').trim();
     const customer_id = req.query.customer_id;
-    if (!shop) return res.status(400).json({ ok:false, error:'Missing shop' });
-    if (!customer_id) return res.status(400).json({ ok:false, error:'Missing customer_id' });
-
-    const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
     const API_VERSION = process.env.API_VERSION || '2025-10';
-    if (!ADMIN_TOKEN) return res.status(500).json({ ok:false, error:'Admin token not configured' });
+    const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
 
-    // 1) Try metaobjects (GraphQL) if your store has them
+    if (!shop) return res.status(400).json({ ok: false, error: 'Missing shop' });
+    if (!customer_id) return res.status(400).json({ ok: false, error: 'Missing customer_id' });
+    if (!ADMIN_TOKEN) return res.status(500).json({ ok: false, error: 'Admin token not configured' });
+
+    // 1) Try metaobjects via GraphQL (if store supports)
     try {
       const graphUrl = `https://${shop}/admin/api/${API_VERSION}/graphql.json`;
       const gql = `{
@@ -67,47 +84,42 @@ app.get('/apps/measurements/selected', async (req, res) => {
         },
         body: JSON.stringify({ query: gql })
       });
+
       if (mg.ok) {
-        const mgj = await mg.json();
-        const edges = mgj.data && mgj.data.metaobjects && mgj.data.metaobjects.edges || [];
+        const mgj = await mg.json().catch(() => null);
+        const edges = (mgj && mgj.data && mgj.data.metaobjects && mgj.data.metaobjects.edges) || [];
         if (edges.length) {
           const items = edges.map(e => {
-            const node = e.node;
-            const fields = (node.fields || []).reduce((acc,f) => { acc[f.key]=f.value; return acc; }, {});
+            const node = e.node || {};
+            const fields = (node.fields || []).reduce((acc, f) => { acc[f.key] = f.value; return acc; }, {});
             return { id: node.id, type: node.type, fields };
           });
-          // return first as selected and list
-          return res.json({ ok:true, selected: items[0].id, items });
+          return res.json({ ok: true, selected: items[0].id, items });
         }
       }
-    } catch(e){
+    } catch (e) {
       // ignore and fallback to metafields
       console.warn('metaobjects check failed', e && e.message);
     }
 
     // 2) Fallback: list customer metafields in namespace 'measurements'
-    // Note: GET metafields with owner_id & owner_resource filter
-    const restUrl = `https://${shop}/admin/api/${API_VERSION}/metafields.json?owner_id=${encodeURIComponent(customer_id)}&owner_resource=customer&namespace=measurements`;
-    const r = await fetch(restUrl, {
-      method: 'GET',
-      headers: {
-        'X-Shopify-Access-Token': ADMIN_TOKEN,
-        'Content-Type': 'application/json'
-      }
-    });
-    if (!r.ok) {
-      const txt = await r.text().catch(()=>null);
-      console.error('metafields list failed', r.status, txt);
-      return res.status(r.status).send(txt || `metafields list failed ${r.status}`);
+    const restUrl = `/metafields.json?owner_id=${encodeURIComponent(customer_id)}&owner_resource=customer&namespace=measurements`;
+    const listResult = await adminRequestForShop(shop, restUrl, 'GET', null, API_VERSION);
+
+    if (!listResult.ok) {
+      // forward raw response for debugging
+      const payload = listResult.body || `metafields list failed ${listResult.status}`;
+      console.error('metafields list failed', listResult.status, payload);
+      return res.status(listResult.status).send(payload);
     }
-    const j = await r.json();
-    const mf = j.metafields || [];
-    if (!mf.length) return res.json({ ok:false }); // no measurements found
+
+    const mf = (listResult.body && listResult.body.metafields) || [];
+    if (!mf.length) return res.json({ ok: false }); // no measurements found
 
     // Map metafields to items
     const items = mf.map(mfItem => {
       let parsed = mfItem.value;
-      try { parsed = JSON.parse(mfItem.value); } catch(e){}
+      try { parsed = JSON.parse(mfItem.value); } catch (e) { /* keep raw */ }
       return {
         id: mfItem.id || mfItem.key,
         key: mfItem.key,
@@ -127,26 +139,28 @@ app.get('/apps/measurements/selected', async (req, res) => {
       }
     }
 
-    return res.json({ ok:true, items, selected });
+    return res.json({ ok: true, items, selected });
   } catch (err) {
-    console.error('Error in /apps/measurements/selected', err);
-    return res.status(500).json({ ok:false, error: err.message });
+    console.error('Error in /apps/measurements/selected', err && err.stack || err);
+    return res.status(500).json({ ok: false, error: err && err.message });
   }
 });
-// use the environment-provided PORT (Render sets this), fallback to 3000 for local dev
-const port = process.env.PORT || 3000;
+
 // POST /apps/measurements/save
 app.post('/apps/measurements/save', express.json(), async (req, res) => {
   try {
-    const { customer_id, label, values } = req.body || {};
-    const shop = process.env.SHOP || req.query.shop || req.headers['x-shop'] || '';
-    if (!shop) return res.status(400).json({ ok:false, error:'Missing shop' });
-    if (!customer_id) return res.status(400).json({ ok:false, error:'Missing customer_id' });
-    if (!values || typeof values !== 'object') return res.status(400).json({ ok:false, error:'Missing values object' });
-
-    const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
+    const body = req.body || {};
+    const { customer_id, label, values } = body;
+    // allow shop param optionally, otherwise use env SHOP
+    const shopFromReq = (req.query.shop || '').toString().replace(/^https?:\/\//, '').trim();
+    const shop = shopFromReq || (process.env.SHOP || '').replace(/^https?:\/\//, '').trim();
     const API_VER = process.env.API_VERSION || '2025-10';
-    if (!ADMIN_TOKEN) return res.status(500).json({ ok:false, error:'Admin token not configured' });
+    const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
+
+    if (!shop) return res.status(400).json({ ok: false, error: 'Missing shop' });
+    if (!customer_id) return res.status(400).json({ ok: false, error: 'Missing customer_id' });
+    if (!values || typeof values !== 'object') return res.status(400).json({ ok: false, error: 'Missing values object' });
+    if (!ADMIN_TOKEN) return res.status(500).json({ ok: false, error: 'Admin token not configured' });
 
     const key = `measurement_${Date.now()}`;
     const payload = {
@@ -160,8 +174,8 @@ app.post('/apps/measurements/save', express.json(), async (req, res) => {
       }
     };
 
-    const url = `https://${shop}/admin/api/${API_VER}/metafields.json`;
-    const r = await fetch(url, {
+    const urlPath = '/metafields.json';
+    const r = await fetch(`https://${shop}/admin/api/${API_VER}${urlPath}`, {
       method: 'POST',
       headers: {
         'X-Shopify-Access-Token': ADMIN_TOKEN,
@@ -170,13 +184,17 @@ app.post('/apps/measurements/save', express.json(), async (req, res) => {
       body: JSON.stringify(payload)
     });
 
-    const j = await r.json().catch(()=> null);
+    // parse response safely
+    const respText = await r.text().catch(() => null);
+    let j = null;
+    try { j = respText ? JSON.parse(respText) : null; } catch (e) { j = respText; }
+
     if (!r.ok) {
       console.error('metafield create failed', r.status, j);
-      return res.status(r.status).json({ ok:false, error: j || 'metafield create failed' });
+      return res.status(r.status).json({ ok: false, error: j || 'metafield create failed' });
     }
 
-    // try to set selected metafield (non-fatal)
+    // try to create a 'selected' metafield that points to the new key (non-fatal)
     try {
       const sel = {
         metafield: {
@@ -188,22 +206,26 @@ app.post('/apps/measurements/save', express.json(), async (req, res) => {
           owner_resource: 'customer'
         }
       };
-      await fetch(url, {
+      // create selected metafield (ignore failure)
+      await fetch(`https://${shop}/admin/api/${API_VER}${urlPath}`, {
         method: 'POST',
         headers: {
           'X-Shopify-Access-Token': ADMIN_TOKEN,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify(sel)
-      }).catch(e => console.warn('selected metafield create ignored', e.message));
-    } catch(e) { console.warn('selected metafield ignored', e && e.message); }
+      }).catch(e => console.warn('selected metafield create ignored', e && e.message));
+    } catch (e) {
+      console.warn('selected metafield ignored', e && e.message);
+    }
 
-    return res.json({ ok:true, metafield: j && j.metafield ? j.metafield : j });
+    return res.json({ ok: true, metafield: j && j.metafield ? j.metafield : j });
   } catch (err) {
-    console.error('Error in /apps/measurements/save', err && err.stack || err);
-    return res.status(500).json({ ok:false, error: err && err.message });
+    console.error('Error in /apps/measurements/save', err && (err.stack || err));
+    return res.status(500).json({ ok: false, error: err && err.message });
   }
 });
 
-
+// Port
+const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`Server running on port ${port}`));
