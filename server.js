@@ -133,6 +133,8 @@ app.get('/apps/measurements/selected', async (req, res) => {
     return res.status(500).json({ ok:false, error: err.message });
   }
 });
+// use the environment-provided PORT (Render sets this), fallback to 3000 for local dev
+const port = process.env.PORT || 3000;
 
 
 app.listen(port, () => console.log(`Server running on port ${port}`));
