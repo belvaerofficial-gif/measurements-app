@@ -15,7 +15,7 @@ app.get('/measurements.html', (req, res) => {
 
 const SHOP = process.env.SHOP;
 const TOKEN = process.env.ADMIN_TOKEN;
-const API_VER = process.env.API_VERSION || '2025-07';
+const API_VER = process.env.API_VERSION || '2025-10';
 
 async function adminRequest(path, method = 'GET', body = null) {
   const url = `https://${SHOP}/admin/api/${API_VER}${path}`;
