@@ -135,6 +135,75 @@ app.get('/apps/measurements/selected', async (req, res) => {
 });
 // use the environment-provided PORT (Render sets this), fallback to 3000 for local dev
 const port = process.env.PORT || 3000;
+// POST /apps/measurements/save
+app.post('/apps/measurements/save', express.json(), async (req, res) => {
+  try {
+    const { customer_id, label, values } = req.body || {};
+    const shop = process.env.SHOP || req.query.shop || req.headers['x-shop'] || '';
+    if (!shop) return res.status(400).json({ ok:false, error:'Missing shop' });
+    if (!customer_id) return res.status(400).json({ ok:false, error:'Missing customer_id' });
+    if (!values || typeof values !== 'object') return res.status(400).json({ ok:false, error:'Missing values object' });
+
+    const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
+    const API_VER = process.env.API_VERSION || '2025-10';
+    if (!ADMIN_TOKEN) return res.status(500).json({ ok:false, error:'Admin token not configured' });
+
+    const key = `measurement_${Date.now()}`;
+    const payload = {
+      metafield: {
+        namespace: 'measurements',
+        key,
+        type: 'json',
+        value: JSON.stringify({ label: label || '', values }),
+        owner_id: Number(customer_id),
+        owner_resource: 'customer'
+      }
+    };
+
+    const url = `https://${shop}/admin/api/${API_VER}/metafields.json`;
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'X-Shopify-Access-Token': ADMIN_TOKEN,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const j = await r.json().catch(()=> null);
+    if (!r.ok) {
+      console.error('metafield create failed', r.status, j);
+      return res.status(r.status).json({ ok:false, error: j || 'metafield create failed' });
+    }
+
+    // try to set selected metafield (non-fatal)
+    try {
+      const sel = {
+        metafield: {
+          namespace: 'measurements',
+          key: 'selected',
+          type: 'single_line_text_field',
+          value: key,
+          owner_id: Number(customer_id),
+          owner_resource: 'customer'
+        }
+      };
+      await fetch(url, {
+        method: 'POST',
+        headers: {
+          'X-Shopify-Access-Token': ADMIN_TOKEN,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(sel)
+      }).catch(e => console.warn('selected metafield create ignored', e.message));
+    } catch(e) { console.warn('selected metafield ignored', e && e.message); }
+
+    return res.json({ ok:true, metafield: j && j.metafield ? j.metafield : j });
+  } catch (err) {
+    console.error('Error in /apps/measurements/save', err && err.stack || err);
+    return res.status(500).json({ ok:false, error: err && err.message });
+  }
+});
 
 
 app.listen(port, () => console.log(`Server running on port ${port}`));
